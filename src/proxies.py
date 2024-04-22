@@ -1,5 +1,7 @@
+import surgeo
 import pandas as pd
 import rpy2.robjects as ro
+import sklearn
 from rpy2.robjects import pandas2ri
 from rpy2.robjects.packages import importr, data
 
@@ -20,11 +22,32 @@ class BaseProxy:
         pass
 
 
+class gBisg(BaseProxy):
+
+    def __init__(self):
+        self.geo = surgeo.GeocodeModel(geo_level="tract")
+    def validate_data(self, data) -> bool:
+        assert "state" in data.columns, "Must contain a column labeled \"state\" " \
+                                          "This is case sensitive"
+
+        assert "tract" in data.columns, "Must contain a column labeled \"tract\" " \
+                                        "This is case sensitive"
+
+        assert "county" in data.columns, "Must contain a column labeled \"county\" "\
+                                        "This is case sensitive"
+
+        return data[["state","county", "tract"]]
+
+    def inference(self, data: pd.DataFrame):
+        data = self.validate_data(data)
+        return self.geo.get_probabilities_tract(data)
+
 
 class Bisg(BaseProxy):
 
     def __init__(self, geo_level="tract", surname_only=False):
         self.wru = importr('wru')
+        self.surname_only = surname_only
         self.call_wru = lambda x: self.wru.predict_race(
             voter_file = x,
             census_geo = geo_level,
@@ -35,20 +58,20 @@ class Bisg(BaseProxy):
         assert type(data) is pd.DataFrame, "Data must be pandas dataframe"
 
         #TODO: improve functionality to include other census.geo fields
+
         assert "surname" in data.columns, "Must contain a column labeled \"surname\" "\
                                           "This is case sensitive"
+        if not self.surname_only:
+            assert "state" in data.columns, "Must contain a column labeled \"state\" " \
+                                            "This is case sensitive"
 
-        assert "state" in data.columns, "Must contain a column labeled \"state\" "\
-                                        "This is case sensitive"
+            assert "tract" in data.columns, "Must contain a column labeled \"tract\" " \
+                                            "This is case sensitive"
 
-        # assert "zcta" in data.columns, "Must contain a column labeled \"zcta\" "\
-        #                                 "This is case sensitive"
-
+            assert "county" in data.columns, "Must contain a column labeled \"county\" " \
+                                             "This is case sensitive"
 
         return data
-
-
-
 
 
     def inference(self, data: pd.DataFrame):
@@ -82,17 +105,36 @@ class fBisg(Bisg):
 
 
 
-fbisg = fBisg()
-bisg = Bisg()
+class ftBisg(BaseProxy):
+    def __init__(self, base_bisg, model):
+
+        assert isinstance(base_bisg, BaseProxy)
+        self.base = base_bisg
+
+        supported_models = [
+            sklearn.linear_model.LogisticRegression,
+            sklearn.ensemble.GradientBoostingClassifier,
+            sklearn.ensemble.RandomForestClassifier,
+        ]
+
+        assert type(model) in supported_models, "Model not supported"
+
+        self.model = model
+
+    def train(self, X, Y):
+        self.model.fit(X,Y)
+
+    def inference(self, X: pd.DataFrame):
+        return self.model.predict_proba(X)
 
 
-wru = importr('wru')
-voters = data(wru).fetch("voters")["voters"]
-with (ro.default_converter + pandas2ri.converter).context():
-  pd_from_r_df = ro.conversion.get_conversion().rpy2py(voters)
+class bpBisg(BaseProxy):
+    def __init__(self, geo_index):
+        self.geo_index = geo_index
+        pass
 
-bisg.inference(pd_from_r_df)
-fbisg.inference(pd_from_r_df)
+
+
 
 
 

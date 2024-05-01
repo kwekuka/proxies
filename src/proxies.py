@@ -1,9 +1,14 @@
 import surgeo
-import pandas as pd
-import rpy2.robjects as ro
 import sklearn
+import pymc as pm
+import pandas as pd
+import arviz as az
+import rpy2.robjects as ro
 from rpy2.robjects import pandas2ri
 from rpy2.robjects.packages import importr, data
+from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import GradientBoostingClassifier, RandomForestClassifier
+
 
 class BaseProxy:
     """
@@ -104,22 +109,24 @@ class fBisg(Bisg):
         )
 
 
+class mlBisg(BaseProxy):
+    def __init__(self, model: str):
 
-class ftBisg(BaseProxy):
-    def __init__(self, base_bisg, model):
 
-        assert isinstance(base_bisg, BaseProxy)
-        self.base = base_bisg
+        if model.lower() == "mr":
+            self.model = LogisticRegression(multi_class='multinomial', solver='lbfgs',
+                                            penalty="l2", tol=1e-7, max_iter=int(1e6))
 
-        supported_models = [
-            sklearn.linear_model.LogisticRegression,
-            sklearn.ensemble.GradientBoostingClassifier,
-            sklearn.ensemble.RandomForestClassifier,
-        ]
+        elif model.lower() == "gb":
+            self.model = GradientBoostingClassifier(n_estimators=100, learning_rate=1.0,
+                                                    max_depth=2, random_state=0)
 
-        assert type(model) in supported_models, "Model not supported"
+        elif model.lower() == "rf":
+            self.model = RandomForestClassifier(max_depth=2, random_state=0)
 
-        self.model = model
+        else:
+            raise Exception("Model not implemented")
+
 
     def train(self, X, Y):
         self.model.fit(X,Y)
@@ -135,7 +142,33 @@ class bpBisg(BaseProxy):
 
 
 
+class bmrBisg(BaseProxy):
+    def __init__(self):
+        pass
 
+    def train(self, X, Y):
+
+        Y_target = pd.get_dummies(Y == 1).to_numpy()
+
+        n, m = X.shape[1], Y_target.shape[1]
+
+
+        with pm.Model() as bmr:
+            X_data = pm.Data('X_data', X)
+            y_obs_data = pm.Data('Y_data', Y)
+
+            b = pm.Normal('intercept', mu=1, sigma=1, shape=m)
+            A = pm.Normal('weights', mu=1, sigma=1, shape=(n, m))
+
+
+            mu = pm.math.dot(X_data, A) + b
+            probs = pm.math.softmax(mu)
+
+            likely = pm.Categorical('obs', p=probs, observed=y_obs_data)
+
+            trace = pm.sample(draws=1)
+            idata = az.from_pymc3(trace)
+            pm.traceplot(idata)
 
 
 

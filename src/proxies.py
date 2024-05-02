@@ -31,6 +31,7 @@ class gBisg(BaseProxy):
 
     def __init__(self):
         self.geo = surgeo.GeocodeModel(geo_level="tract")
+        self.geo_headers = ["tract", "state", "county"]
     def validate_data(self, data) -> bool:
         assert "state" in data.columns, "Must contain a column labeled \"state\" " \
                                           "This is case sensitive"
@@ -43,9 +44,16 @@ class gBisg(BaseProxy):
 
         return data[["state","county", "tract"]]
 
-    def inference(self, data: pd.DataFrame):
-        data = self.validate_data(data)
-        return self.geo.get_probabilities_tract(data)
+    def inference(self, data: pd.DataFrame, drop=False):
+        geo_columns = self.validate_data(data)
+        probs = self.geo.get_probabilities_tract(geo_columns).iloc[:,-6:]
+        probs = probs.fillna(probs.mean())
+
+        data = data.join(probs)
+        if not drop:
+            data = data.drop(self.geo_headers, axis=1)
+
+        return data
 
 
 class Bisg(BaseProxy):
@@ -110,9 +118,11 @@ class fBisg(Bisg):
 
 
 class mlBisg(BaseProxy):
-    def __init__(self, model: str):
+    def __init__(self, model: str, proxy: BaseProxy = None):
 
-
+        if BaseProxy is not None:
+            assert isinstance(proxy, BaseProxy), "must be implemented proxy type"
+            self.proxy = proxy
         if model.lower() == "mr":
             self.model = LogisticRegression(multi_class='multinomial', solver='lbfgs',
                                             penalty="l2", tol=1e-7, max_iter=int(1e6))
@@ -129,10 +139,22 @@ class mlBisg(BaseProxy):
 
 
     def train(self, X, Y):
-        self.model.fit(X,Y)
+        assert self.proxy.validate_data(X) is not False, "Your data isn't formatted right"
+
+        X_proxy = self.proxy.inference(X)
+
+        self.model.fit(X_proxy,Y)
 
     def inference(self, X: pd.DataFrame):
-        return self.model.predict_proba(X)
+        assert self.proxy.validate_data(X) is not False, "Your data isn't formatted right"
+
+        X_proxy = self.proxy.inference(X)
+
+        return self.model.predict_proba(X_proxy)
+
+    def validate_data(self, data) -> bool:
+        pass
+
 
 
 class bpBisg(BaseProxy):
@@ -169,7 +191,6 @@ class bmrBisg(BaseProxy):
             trace = pm.sample(draws=1)
             idata = az.from_pymc3(trace)
             pm.traceplot(idata)
-
 
 
 

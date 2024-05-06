@@ -1,3 +1,4 @@
+import numpy as np
 import surgeo
 import sklearn
 import pymc as pm
@@ -20,18 +21,36 @@ class BaseProxy:
     def train(self, data: pd.DataFrame):
         pass
 
-    def inference(self, data: pd.DataFrame):
+    def inference(self, data: pd.DataFrame, races:[str] = None, drop_geo:bool = False, probs_only:bool =False):
+
         pass
 
-    def validate_data(self, data) -> bool:
+    def validate_data(self, data) -> pd.DataFrame:
         pass
+
+    def consolidate_race_probs(self, probs: pd.DataFrame, races: [str]) -> pd.DataFrame:
+        assert set(races).issubset(set(probs.columns)), "all races must be contained in df"
+
+        incl_indexes = [list(probs.columns).index(r) for r in races]
+        all_index = np.arange(probs.shape[1])
+
+        excl_indexes = [ix for ix in all_index if ix not in incl_indexes]
+
+        probs_new = probs.iloc[:,incl_indexes]
+        if excl_indexes: #if list is not empty
+            probs_new["other"] = probs.iloc[:,excl_indexes].sum(axis=1, min_count=1)
+
+        return probs_new
 
 
 class gBisg(BaseProxy):
+    #TODO replace with ACS
 
-    def __init__(self):
+    def __init__(self, races: [str] = None):
+        self.races = races
         self.geo = surgeo.GeocodeModel(geo_level="tract")
         self.geo_headers = ["tract", "state", "county"]
+
     def validate_data(self, data) -> bool:
         assert "state" in data.columns, "Must contain a column labeled \"state\" " \
                                           "This is case sensitive"
@@ -44,16 +63,26 @@ class gBisg(BaseProxy):
 
         return data[["state","county", "tract"]]
 
-    def inference(self, data: pd.DataFrame, drop=False):
+
+
+
+
+    def inference(self, data: pd.DataFrame, races:[str] = None, drop_geo=False, probs_only=False):
         geo_columns = self.validate_data(data)
         probs = self.geo.get_probabilities_tract(geo_columns).iloc[:,-6:]
+        probs = self.consolidate_race_probs(probs, races)
         probs = probs.fillna(probs.mean())
 
-        data = data.join(probs)
-        if not drop:
-            data = data.drop(self.geo_headers, axis=1)
 
-        return data
+
+        if probs_only:
+            return probs
+        else:
+            if drop_geo:
+                data = data.drop(self.geo_headers, axis=1)
+
+            data = pd.concat([data,probs], axis=1)
+            return data
 
 
 class Bisg(BaseProxy):
@@ -119,10 +148,11 @@ class fBisg(Bisg):
 
 class mlBisg(BaseProxy):
     def __init__(self, model: str, proxy: BaseProxy = None):
-
-        if BaseProxy is not None:
+        self.proxy = proxy
+        if self.proxy is not None:
             assert isinstance(proxy, BaseProxy), "must be implemented proxy type"
             self.proxy = proxy
+
         if model.lower() == "mr":
             self.model = LogisticRegression(multi_class='multinomial', solver='lbfgs',
                                             penalty="l2", tol=1e-7, max_iter=int(1e6))
@@ -139,18 +169,20 @@ class mlBisg(BaseProxy):
 
 
     def train(self, X, Y):
-        assert self.proxy.validate_data(X) is not False, "Your data isn't formatted right"
+        if self.proxy is not None:
+            proxy_input = self.proxy.validate_data(X)
 
-        X_proxy = self.proxy.inference(X)
+            X = self.proxy.inference(proxy_input, drop_geo=True)
+        X = X.to_numpy().astype(float)
 
-        self.model.fit(X_proxy,Y)
+        self.model.fit(X,Y)
 
     def inference(self, X: pd.DataFrame):
-        assert self.proxy.validate_data(X) is not False, "Your data isn't formatted right"
+        if self.proxy is not None:
+            X = self.proxy.validate_data(X)
+            X = self.proxy.inference(X)
 
-        X_proxy = self.proxy.inference(X)
-
-        return self.model.predict_proba(X_proxy)
+        return self.model.predict_proba(X)
 
     def validate_data(self, data) -> bool:
         pass

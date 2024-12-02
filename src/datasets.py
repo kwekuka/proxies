@@ -23,11 +23,11 @@ class HMDA:
             "tract": str
         })
 
-
-        self.continuous_features = continuous_features = [
+        continuous_features = [
             "loan_amount",
             "income",
         ]
+        self.continuous_features = continuous_features
 
         self.categorial_features = ["denial_reason-1"]
         if outcome:
@@ -141,7 +141,7 @@ class Census:
         self.races = races
 
 
-    def fetch_surname_race_probs(self, rank=None):
+    def fetch_surname_race_probs(self, counts=False, rank=None):
         if rank is None:
             rank = np.iinfo(int).max
 
@@ -174,12 +174,17 @@ class Census:
         surname_df = surname_df.rename(inplace=False, columns=race_mapper)
 
         surname_race_probs = surname_df.loc[:,race_mapper.values()].astype(float)
-        surname_df.loc[:,race_mapper.values()] = surname_race_probs/surname_race_probs.sum(axis=0)
+
+        surname_race_probs = surname_race_probs.mul(surname_df["COUNT"].astype(float), axis=0)
+        if not counts:
+            surname_df.loc[:,race_mapper.values()] = surname_race_probs/surname_race_probs.sum(axis=0)
+        else:
+            surname_df.loc[:,race_mapper.values()] = surname_race_probs
 
         return surname_df
 
 
-    def consolidate_race_probs(self, df, index):
+    def consolidate_race_probs(self, df, index_base):
         races = self.races
         all_races = self.all_races
 
@@ -190,7 +195,7 @@ class Census:
             excl_indexes = [ix for ix in all_index if ix not in incl_indexes]
 
             # Get the probs we want to keep
-            probs = df.copy().iloc[:, incl_indexes].astype(int)
+            probs = df.copy().iloc[:, incl_indexes].astype(float)
 
             # Drop all probs
             drop = df.drop(df.columns[all_index], axis=1, inplace=False)
@@ -200,7 +205,7 @@ class Census:
 
             if excl_indexes:
                 # Get the probs we are grouping together
-                other_probs = df.copy().iloc[:, excl_indexes].astype(int).sum(axis=1, min_count=1)
+                other_probs = df.copy().iloc[:, excl_indexes].sum(axis=1, min_count=1)
 
                 # Add them back on
                 drop["other"] = other_probs
@@ -211,12 +216,17 @@ class Census:
         # Get the indices in the above
         prob_indices = [drop_columns.index(r) for r in races + ["other"]]
 
-        # Make dictionary index
-        index_dict = dict(zip(drop.loc[:, index], np.arange(len(drop))))
 
-        return BaseIndex(drop.iloc[:, prob_indices], index=index_dict)
 
-    def load_surname_table(self, index="NAME"):
+        p = drop.iloc[:, prob_indices]
+        if index_base is None:
+            return drop.iloc[:, prob_indices]
+        else:
+            # Make dictionary index
+            index_dict = dict(zip(drop.loc[:, index_base], np.arange(len(drop))))
+            return BaseIndex(drop.iloc[:, prob_indices], index=index_dict)
+
+    def load_surname_table(self, index="NAME", counts=True):
         if self.cache:
             file_loc = os.path.join(self.data_path, "data/census")
             if not os.path.exists(file_loc):
@@ -226,17 +236,33 @@ class Census:
             if os.path.isfile(fname):
                 surname_table = pd.read_csv(fname)
             else:
-                surname_table = self.fetch_surname_race_probs()
+                surname_table = self.fetch_surname_race_probs(counts)
                 surname_table.to_csv(fname, index=False)
         else:
-            surname_table = self.fetch_surname_race_probs()
+            surname_table = self.fetch_surname_race_probs(counts)
 
 
+        surname_table = surname_table.set_index("NAME")
+        surname_table = surname_table.loc[:,self.all_races]
 
-        return self.consolidate_race_probs(surname_table, index)
+        return self.consolidate_race_probs_df(surname_table, races=self.races)
+
+    def consolidate_race_probs_df(self, probs: pd.DataFrame, races: [str]) -> pd.DataFrame:
+        # assert set(races).issubset(set(probs.columns)), "all races must be contained in df"
+
+        incl_indexes = [list(probs.columns).index(r) for r in races if r in list(probs.columns)]
+        all_index = np.arange(probs.shape[1])
+
+        excl_indexes = [ix for ix in all_index if ix not in incl_indexes]
+
+        probs_new = probs.iloc[:, incl_indexes].astype(float)
+        if excl_indexes:  # if list is not empty
+            probs_new["other"] = probs.iloc[:, excl_indexes].astype(float).sum(axis=1, min_count=1)
+
+        return probs_new
 
 
-    def load_geo_table(self, index, path=None):
+    def load_geo_table(self,  races, index, path=None):
         if path is None:
             path = "../data/census/race.csv"
 
@@ -244,7 +270,44 @@ class Census:
         df = pd.read_csv(path, dtype=str)
 
 
-        return self.consolidate_race_probs(df, index)
+        df = df.set_index(index)
+        df = df.loc[:,constants.races].astype(float)
+
+        df = df[df.sum(axis = 1) >= 1]
+        geo_table = self.consolidate_race_probs_df(df, races)
+        return geo_table
+
+
+
+class Voters:
+    def __init__(self, path):
+        assert os.path.isfile(path)
+
+        self.data = pd.read_csv(path, dtype=str)
+        self.data["race"] = self.data["race"].replace({
+            "asian": "api",
+            "hisp": "hispanic",
+        })
+
+        self.data["dem"] = (self.data["party"] == "dem")
+        self.data["rep"] = (self.data["party"] == "rep")
+        self.data["ind"] = (self.data["party"] == "ind")
+
+        self.dem = self.data.groupby("geoid").dem.mean()
+        self.rep =  self.data.groupby("geoid").rep.mean()
+        self.ind =  self.data.groupby("geoid").ind.mean()
+
+
+    def party_comp_id(self, geoid, group):
+
+        if group == "dem":
+            return self.dem["geoid"]
+        elif group == "rep":
+            return self.rep["geoid"]
+        elif group == "ind":
+            return self.ind["geoid"]
+        else:
+            raise Exception("group not implemented")
 
 
 

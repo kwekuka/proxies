@@ -299,7 +299,6 @@ class Voters:
 
 
     def party_comp_id(self, geoid, group):
-
         if group == "dem":
             return self.dem["geoid"]
         elif group == "rep":
